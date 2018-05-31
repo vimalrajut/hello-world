@@ -1,1 +1,291 @@
 hi
+import groovy.json.*
+import hudson.FilePath;
+import jenkins.model.Jenkins;
+def checkString(value) {
+    if ( value != null && !value.isEmpty() && !value.trim().isEmpty() && value != "null"){
+        return true
+    }else {
+        return false
+    }
+}
+def readFileCommon(path) {
+    if (env['NODE_NAME'] == null ) {
+        error "please define master server"
+    } else if (env['NODE_NAME'].equals("master")) {
+        return new FilePath(null, path).readToString();
+    } else {
+        return new FilePath(Jenkins.getInstance().getComputer(env['NODE_NAME']).getChannel(), path).readToString();
+    }
+}
+def jenkinsScriptFolder
+def dockerImageName
+def dockerTagName
+def profileMatchEntrypoint
+def parametersMaps = [:]
+pipeline {
+    agent { node { label 'PSD2-DEV-SLAVE' } }
+    parameters {
+        choice(name: 'profile',choices: "account-balance", description: 'profile Name for build Maven Project')
+        choice(name: 'others', choices: 'boiDev\nboiTest', description: 'others')
+    }
+    environment {
+        mavenProfileCheck=false
+    }
+      stages {
+        stage ('clean workspace') {
+          steps {
+            deleteDir()
+          }
+        }
+        stage ('get parameters details for environment file') {
+            agent { node { label 'master' } }
+            steps {
+                script {
+                    def getParentPathJobs = new File("${env.WORKSPACE}").getParent()
+                    jenkinsScriptFolder = new File("${env.JENKINS_HOME}","workspace/${env.JOB_NAME}@script")
+                    if ( ! jenkinsScriptFolder.exists()){
+                      error "jenkins script directory does not exist"
+                    }
+                    def jsondata = readFileCommon("${jenkinsScriptFolder}/common/deployment/environmentParameters.json")
+                    def parsedJson = new groovy.json.JsonSlurper().parseText(jsondata)
+                    if (parsedJson.get('environment')) {
+                        parsedJson.get('environment').get("${params.others}").each { key, value ->
+                         if (value instanceof Map) {
+                            value.each { mapKey, mapValue ->
+                              if (!(mapValue instanceof Map)) {
+                                parametersMaps[mapKey] = mapValue
+                              }else if (mapValue instanceof Map) {
+                                if ( mapKey == "${params.profile}" && mapValue instanceof Map){
+                                    parametersMaps['profile'] = mapKey
+                                    mapValue.each { profilekey, profilevalue ->
+                                    if ( profilevalue instanceof Map) {
+                                      value.each { k, v ->
+                                        parametersMaps[k] = v
+                                      }
+                                    } else if (!(profilevalue instanceof Map))  {
+                                      parametersMaps[profilekey] = profilevalue
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                         } else {
+                             parametersMaps[key]=value
+                         }
+                      }
+                    } else {
+                      error "unable to parse environment value"
+                    }
+                    if (parsedJson.get("profiles")) {
+                      parsedJson.get("profiles").each { key, value ->
+                      if ( key == "${params.profile}" && value instanceof Map) {
+                        parametersMaps['profile'] = "${params.profile}"
+                        value.each { k, v ->
+                            if ( v instanceof Map){
+                              v.each { profilekey, profilevalue ->
+                                parametersMaps[profilekey] = profilevalue
+                              }
+                            } else {
+                              parametersMaps[k] = v
+                            }
+                        }
+                      }
+                    }
+                  }
+                }
+            }
+        }
+        stage ('create docker registry url') {
+          steps {
+            script {
+              if (checkString(parametersMaps.aws_credential)){
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: "${parametersMaps.aws_credential}", secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                  def aws_account_number = sh(script: "aws sts get-caller-identity | jq -r '.Account'", returnStdout: true)
+                  if (checkString(aws_account_number) && checkString(parametersMaps.region)){
+                    parametersMaps['URL'] = aws_account_number.trim() + ".dkr.ecr.${parametersMaps.region}.amazonaws.com"
+                  } else {
+                    error "unable to get account number"
+                  }
+                }
+              }
+            }
+          }
+        }
+        stage('get docker tag Name') {
+          agent { node { label 'master' } }
+          steps {
+            script {
+              if ( ! jenkinsScriptFolder.exists()){
+                error "jenkins script directory does not exist"
+              }
+              def imageTagData = readFileCommon("${jenkinsScriptFolder}/common/deployment/sourceTagName.json")
+              def imageTagJson = new groovy.json.JsonSlurper().parseText(imageTagData)
+              if (imageTagJson.get("tags").get(parametersMaps.releaseName)){
+                imageTagJson.get("tags").get(parametersMaps.releaseName).each { sourceTags ->
+                  switch(sourceTags.active) {
+                    case "true":
+                      dockerTagName = sourceTags.tagName
+                      break
+                  }
+                }
+              } else {
+                error "there is no tag create for this release"
+              }
+            }
+          }
+        }
+        stage ("git clone project"){
+            steps {
+                script {
+                    println parametersMaps as String
+                    if (checkString(parametersMaps.gitBranch) && checkString(parametersMaps.gitCredentialsId) && checkString(parametersMaps.gitProjectRepo)){
+                     git branch: "${parametersMaps.gitBranch}", credentialsId: "${parametersMaps.gitCredentialsId}", url: "${parametersMaps.gitProjectRepo}"
+                     if (checkString(parametersMaps.codeCheckout)){
+                        echo "checkout to ${parametersMaps.codeCheckout}"
+                        sh "git checkout ${parametersMaps.codeCheckout}"
+                     }
+                    }
+                    else {
+                        error "please provide valid bitbucket branch ${parametersMaps.gitBranch}"
+                    }
+                }
+            }
+        }
+        stage ('check profile name against entrypoint name'){
+            steps {
+                script {
+                    println parametersMaps
+                    if (checkString(parametersMaps.entrypointCheck)){
+                      profileMatchEntrypoint = "${parametersMaps.entrypointCheck}"
+                    } else {
+                      if (checkString(parametersMaps.profile) && "${parametersMaps.profile}".contains('-fs')){
+                          profileMatchEntrypoint = "${parametersMaps.profile}".trim().split('-').collect{ it.capitalize() }.join('')
+                          profileMatchEntrypoint = profileMatchEntrypoint.substring(0, profileMatchEntrypoint.length() - 2) + "MockFoundationService"
+                      }else {
+                          profileMatchEntrypoint = "${parametersMaps.profile}".trim().split('-').collect{ it.capitalize() }.join('')
+                      }
+                    }
+                    if ("${parametersMaps.entryPointPath}".trim().split('/')[0]==profileMatchEntrypoint){
+                        mavenProfileCheck=true
+                    } else{
+                        error "please select right entrypoint for ${parametersMaps.profile}"
+                    }
+                }
+            }
+        }
+        stage ('get clone devops config repo') {
+          steps {
+            script {
+              if (checkString(parametersMaps.gitDevposConfigRepo) && checkString(parametersMaps.gitCredentialsId)) {
+                sh "mkdir devops"
+                dir('devops'){
+                    git branch: 'master', credentialsId: "${parametersMaps.gitCredentialsId}", url: "${parametersMaps.gitDevposConfigRepo}"
+                }
+              } else {
+                error "unable to clone devops config repo"
+              }
+            }
+          }
+        }
+        stage('check required parameters for this build') {
+          when {
+            expression {
+              return (!checkString(parametersMaps.releaseName) && !checkString(parametersMaps.URL) && !checkString(parametersMaps.region) && !checkString(parametersMaps.clusterName) && !checkString(parametersMaps.keyStoreName))
+            }
+          }
+          steps {
+            error "please provide releaseName, URL, Region and clusterName, keyStoreName"
+          }
+        }
+        stage ('maven build'){
+            steps {
+                script {
+                    def server = Artifactory.server('artifactory')
+                    def buildInfo = Artifactory.newBuildInfo()
+                    // maven build - plugin auto deploys the build artifact to the specifid repo
+                    def rtMaven = Artifactory.newMavenBuild()
+                    rtMaven.tool = 'm2'
+                    if (checkString(parametersMaps.classpathBuildAggregate)){
+                      dir("${parametersMaps.classpathBuildAggregate}") {
+                          rtMaven.run pom: 'pom.xml', goals: 'clean install ' + ' -DskipTests=' +"${parametersMaps.skipTest}" + ' -P '+"${parametersMaps.profile}" + ' sonar:sonar -Dsonar.branch='+"${parametersMaps.profile}", buildInfo: buildInfo
+                      }
+                      sh "mkdir ${env.WORKSPACE}/devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}/classpath"
+                      if ( !checkString(parametersMaps.otherBuildAggregate)){
+                        sh "find . -type f  -name *.jar ! -path \"*/.mvn/*\" ! -path \"*@tmp*\"  | xargs -I{} cp -r {} ${env.WORKSPACE}/devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}/classpath"
+                      }
+                    }
+                    if (checkString(parametersMaps.otherBuildAggregate)){
+                      def otherBuildAggregateList = "${parametersMaps.otherBuildAggregate}".split(",")
+                      for (dependecies in otherBuildAggregateList) {
+                        def dependeciesBuildAggregateAndProfile = "${dependecies}".split(":")
+                        dir("${dependeciesBuildAggregateAndProfile[1]}") {
+                            rtMaven.run pom: 'pom.xml', goals: 'clean install ' + ' -DskipTests=' +"${parametersMaps.skipTest}" + ' -P '+"${dependeciesBuildAggregateAndProfile[0]}" + ' sonar:sonar -Dsonar.branch='+"${dependeciesBuildAggregateAndProfile[0]}", buildInfo: buildInfo
+                        }
+                      }
+                      if (! fileExists("${env.WORKSPACE}/devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}/classpath")){
+                        sh "mkdir ${env.WORKSPACE}/devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}/classpath"
+                      }
+                      sh "find . -type f  -name *.jar ! -path \"*/.mvn/*\" ! -path \"*@tmp*\"  | xargs -I{} cp -r {} ${env.WORKSPACE}/devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}/classpath"
+                    }
+                    if (mavenProfileCheck==true && checkString(parametersMaps.mainBuildAggregate)){
+                        dir ("${parametersMaps.mainBuildAggregate}"){
+                            rtMaven.run pom: 'pom.xml', goals: 'clean install ' + ' -DskipTests=' +"${parametersMaps.skipTest}" +' -P '+"${params.profile}" + ' sonar:sonar -Dsonar.branch='+"${parametersMaps.profile}", buildInfo: buildInfo
+                        }
+                        sh "cp ${parametersMaps.entryPointPath}/target/*.jar ${env.WORKSPACE}/devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}/"
+                        server.publishBuildInfo buildInfo
+                    } else {
+                      error "mainBuildAggregate is missing from environment file"
+                    }
+                }
+            }
+        }
+        stage ('docker build and push the images') {
+            steps {
+                dir("devops/${parametersMaps.releaseName}/Docker/${parametersMaps.profile}"){
+                    script {
+                        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', credentialsId: "${parametersMaps.aws_credential}", secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                            dockerImageName = "${parametersMaps.profile}".toLowerCase()
+                            def awsLogin  = sh(script: "aws ecr get-login --region ${parametersMaps.region}", returnStdout: true)
+                            sh "${awsLogin}"
+                            if (checkString(dockerTagName)){
+                              docker.build("${parametersMaps.URL}/${dockerImageName}:${dockerTagName}${BUILD_NUMBER}","-f ${parametersMaps.profile}-Dockerfile .").push()
+                            } else {
+                                error "unable to create docker images and push"
+                            }
+
+                        }
+                    }
+                }
+            }
+        }
+      }
+      post {
+          always {
+              archive "${parametersMaps.entryPointPath}/target/*.jar"
+              //deleteDir() /* clean up our workspace */
+          }
+          success {
+              script {
+                  sh "docker rmi ${parametersMaps.URL}/${dockerImageName}:${dockerTagName}${BUILD_NUMBER}"
+                  if (checkString(parametersMaps.codeTagging)) {
+                      build job: 'CodeTagging', parameters: [
+                          [$class: 'StringParameterValue',  name: 'codeTagging', value: "${parametersMaps.codeTagging}"],
+                          [$class: 'StringParameterValue',  name: 'profile', value: "${parametersMaps.profile}"],
+                          [$class: 'StringParameterValue',  name: 'URL', value: "${parametersMaps.URL}"],
+                          [$class: 'StringParameterValue',  name: 'upstreamBuildNumber', value: "${env.BUILD_NUMBER}"],
+                          [$class: 'StringParameterValue',  name: 'gitProjectRepo', value: "${parametersMaps.gitProjectRepo}"]]
+                  }
+                  if (checkString(params.others) && checkString(parametersMaps.profile)) {
+                      build job: 'Common-CD', parameters: [
+                          [$class: 'StringParameterValue',  name: 'others', value: "${params.others}"],
+                          [$class: 'StringParameterValue',  name: 'dockerBuildNumber', value: "${env.BUILD_NUMBER}"],
+                          [$class: 'StringParameterValue',  name: 'profile', value: "${parametersMaps.profile}"]
+                        ]
+                      }
+                  }
+              }
+          }
+      }
+
+
