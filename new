@@ -1,1 +1,55 @@
 Hi
+FROM appdynamicsagent-alpine-oraclejdk8
+VOLUME /tmp
+RUN mkdir /classpath && chmod -R 774 /classpath
+ADD *.jar AccountBalance-1.0.0.jar
+ADD classpath/*.jar /classpath/
+ADD docker-entrypoint.sh /docker-entrypoint.sh
+RUN sh -c 'touch /AccountBalance-1.0.0.jar' && chmod a+x /docker-entrypoint.sh
+CMD ["/bin/bash","/docker-entrypoint.sh"]
+
+
+#!/bin/bash
+if [[ -z $cipherBucketName ]]; then
+  echo "please provide cipher bucket Name"
+  exit 1
+fi
+if [[ -z $region ]]; then
+  echo "please provide region"
+  exit 1
+fi
+if [[ -z $keyStoreName ]];then
+   echo "please provide key store name"
+fi
+if [[ -n $https_proxy ]];then
+   protocol="HTTPS"
+   IFS=':' read proxyHost proxyPort <<< $https_proxy
+elif [[ -n $http_proxy ]];then
+   protocol="HTTP"
+   IFS=':' read proxyHost proxyPort <<< $http_proxy
+fi
+if [[ -n ${SPRING_PROFILES_ACTIVE} && -n ${cipherBucketName} && -n ${keyStoreName} ]]; then
+   aws s3 --no-verify-ssl cp s3://${cipherBucketName}/${releaseName}/keystores/${keyStoreName}  /classpath/${keyStoreName} --region ${region}
+   aws s3 --no-verify-ssl cp s3://${cipherBucketName}/${releaseName}/truststores/trustStore.jks /config/trustStore.jks --region ${region}
+   aws s3 --no-verify-ssl cp s3://${cipherBucketName}/${releaseName}/passwords.yml  /classpath/application-${SPRING_PROFILES_ACTIVE}.yml --region ${region}
+else
+  echo "please check your task defination"
+  exit 1
+fi
+if [[ ! -f /classpath/${keyStoreName} ]];then
+  echo "${keyStoreName} file is not exist"
+  exit 1
+fi
+if [[ ! -f /classpath/application-${SPRING_PROFILES_ACTIVE}.yml ]];then
+  echo "/classpath/application-${SPRING_PROFILES_ACTIVE}.yml file is not exist"
+  exit 1
+fi
+if [[ $?==0 ]] && [[ -n $http_proxy || -n $https_proxy  ]]; then
+    if [[ -n $proxyHost && -n $proxyPort ]];then
+	    java -javaagent:/home/AppServerAgent/javaagent.jar -Dappdynamics.controller.hostName=${controllerHost} -Dappdynamics.agent.nodeName="$SPRING_MAVEN_PROFILE" -Dappdynamics.agent.tierName="$SPRING_MAVEN_PROFILE" -Dappdynamics.agent.applicationName="${appdynamicsApplicationName}" -Djavax.net.ssl.trustStore=/config/trustStore.jks -Dloader.path="/classpath/" -Daws.region=${region} -Daws.proxy=true -Daws.proxyHost=${proxyHost} -Daws.proxyPort=${proxyPort} -Daws.protocol=${protocol} -Dapp.proxyProtocol=HTTP  -jar /AccountBalance-1.0.0.jar
+    else
+        echo "proxy setting invalid $proxyHost $proxyPort"
+    fi
+elif [[ $?==0 ]]; then
+  java -javaagent:/home/AppServerAgent/javaagent.jar -Dappdynamics.controller.hostName=${controllerHost} -Dappdynamics.agent.nodeName="$SPRING_MAVEN_PROFILE" -Dappdynamics.agent.tierName="$SPRING_MAVEN_PROFILE" -Dappdynamics.agent.applicationName="${appdynamicsApplicationName}" -Djavax.net.ssl.trustStore=/config/trustStore.jks  -Dloader.path="/classpath/" -Daws.region=${region}   -jar /AccountBalance-1.0.0.jar
+fi
