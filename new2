@@ -13,7 +13,7 @@
         "scaleOutCooldownTime": 60,
         "scaleInCooldownTime": 60,
         "targetValue": 80.00,
-        "ecsAutoScaleRole": "arn:aws:iam::843865943735:role/ecsAutoscaleRole"
+        "ecsAutoScaleRole": "arn:aws:iam:::role/ecsAutoscaleRole"
       }
     },
     "account-beneficiaries": {
@@ -297,7 +297,7 @@
       "profiles" : {
         "config-server": {
           "others" : "native",
-          "gitBoiCredentialsId": "6ccad742-12fa-491a-b034-4c8909331a70",
+          "gitBoiCredentialsId": "",
           "bitbucketUiRepo": "cap-gemini/psd2-config-ui-boidev-mcr-0.7.1",
           "bitbucketApplicationRepo": "cap-gemini/psd2-config-application-boidev-mcr-0.7.1",
           "bitbucketHost": "bitbucket.org",
@@ -323,11 +323,11 @@
       "aws_pull_credential": "AWS_Cred_boiDev",
       "controllerHost": "bankofireland-dev.saas.appdynamics.com",
       "appdynamicsApplicationName": "PSD2PREPROD",    
-      "gitCredentialsId": "a5f0ddf7-8163-4174-8593-2032a80f6d9a",
+      "gitCredentialsId": "aa",
       "gitBranch": "master",
       "gitDevopsBranch": "master",
-      "gitProjectRepo": "git@bitbucket.org:cap-gemini/psd2-release-mcr-0.7.1.git",
-      "gitDevposConfigRepo": "git@bitbucket.org:cap-gemini/psd2-devops-config.git"
+      "gitProjectRepo": "git@bitbucket.",
+      "gitDevposConfigRepo": "git@bitbucket.org"
     },
     "boiTest": {
       "releaseName": "mcr-release-0.7.1",
